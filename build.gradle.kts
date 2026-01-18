@@ -27,7 +27,7 @@ dependencies {
     implementation("ai.djl.pytorch:pytorch-engine:0.36.0")
     implementation("ai.djl.pytorch:pytorch-native-cpu:2.7.1")
     implementation("ai.djl.huggingface:tokenizers:0.36.0")
-    implementation("org.slf4j:slf4j-simple:2.0.16")
+    implementation("org.slf4j:slf4j-simple:2.0.17")
     implementation("io.github.oshai:kotlin-logging-jvm:7.0.14")
     testImplementation(kotlin("test"))
 }
