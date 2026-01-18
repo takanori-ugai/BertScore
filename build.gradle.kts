@@ -4,6 +4,7 @@ import org.jlleitschuh.gradle.ktlint.reporter.ReporterType
 
 plugins {
     kotlin("jvm") version "2.3.0"
+    java
     id("org.jetbrains.dokka") version "2.1.0"
     id("io.gitlab.arturbosch.detekt") version "1.23.8"
     id("com.gradleup.shadow") version "9.3.1"
@@ -47,6 +48,19 @@ tasks {
     compileTestKotlin {
         compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
         doLast { println("Finished compiling Kotlin Test source code") }
+    }
+
+    compileJava {
+        options.encoding = "UTF-8"
+        options.compilerArgs.addAll(listOf("-Xlint:deprecation"))
+        sourceCompatibility = "17"
+        targetCompatibility = "17"
+    }
+
+    compileTestJava {
+        options.encoding = "UTF-8"
+        options.compilerArgs.addAll(listOf("-Xlint:deprecation"))
+        sourceCompatibility = "17"
     }
 
     jacocoTestReport {
@@ -118,8 +132,9 @@ mavenPublishing {
 
     // POM情報（Maven Centralには必須）
     pom {
-        name = "KotlinVH"
-        description = "Kotlin Multiplatform library for interacting with the Virtual Home API."
+        name = "BERTScore4kt"
+        description =
+            "A Kotlin library for calculating BERTScore using Deep Java Library (DJL) and HuggingFace tokenizers. "
         url = "https://github.com/takanori-ugai/BertScore"
         inceptionYear.set("2026")
         licenses {
@@ -136,8 +151,8 @@ mavenPublishing {
             }
         }
         scm {
-            connection = "scm:https://github.com/takanori-ugai/KBertScore.git"
-            developerConnection = "scm:https://github.com/takanori-ugai/KotlinVH.git"
+            connection = "scm:https://github.com/takanori-ugai/BertScore.git"
+            developerConnection = "scm:https://github.com/takanori-ugai/BertScore.git"
             url = "https://github.com/takanori-ugai/BertScore"
         }
     }

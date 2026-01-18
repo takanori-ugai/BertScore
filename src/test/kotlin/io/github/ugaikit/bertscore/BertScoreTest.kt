@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class BertScoreTest {
-
     @Test
     fun testScoreExactMatch() {
         val bertScore = BertScore()
@@ -33,10 +32,10 @@ class BertScoreTest {
         assertTrue(score.precision > 0.8f, "Precision should be reasonably high")
         assertTrue(score.recall > 0.8f, "Recall should be reasonably high")
         assertTrue(score.f1 > 0.8f, "F1 should be reasonably high")
-        
+
         assertTrue(score.precision < 1.0f, "Precision should not be 1.0 for different sentences")
     }
-    
+
     @Test
     fun testScoreCompletelyDifferent() {
         val bertScore = BertScore()

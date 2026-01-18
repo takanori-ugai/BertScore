@@ -1,6 +1,6 @@
-# BertScore in Kotlin with DJL
+# BertScore with DJL
 
-A Kotlin library for calculating BERTScore using Deep Java Library (DJL) and HuggingFace tokenizers.
+A Java/Kotlin library for calculating BERTScore using Deep Java Library (DJL) and HuggingFace tokenizers.
 It uses the `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` model to compute semantic similarity between a reference text and a candidate text.
 
 ## Features
