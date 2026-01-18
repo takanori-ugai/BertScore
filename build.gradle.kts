@@ -12,6 +12,7 @@ plugins {
     id("org.jlleitschuh.gradle.ktlint") version "14.0.1"
     jacoco
     id("com.vanniktech.maven.publish") version "0.35.0"
+    id("com.diffplug.spotless") version "8.1.0"
 }
 
 group = "io.github.ugaikit"
@@ -118,6 +119,18 @@ ktlint {
     filter {
         exclude("**/style-violations.kt")
         exclude("**/ResourceData.kt")
+    }
+}
+
+spotless {
+    java {
+        target("src/*/java/**/*.java")
+        importOrder()
+        removeUnusedImports()
+
+        // Choose one of these formatters.
+        googleJavaFormat("1.28.0") // has its own section below
+        formatAnnotations() // fixes formatting of type annotations, see below
     }
 }
 
