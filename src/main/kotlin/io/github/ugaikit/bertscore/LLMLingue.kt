@@ -1,6 +1,7 @@
 package io.github.ugaikit.bertscore
 
 import ai.djl.Device
+import ai.djl.inference.Predictor
 import ai.djl.ndarray.NDArray
 import ai.djl.ndarray.NDList
 import ai.djl.ndarray.NDManager
@@ -16,7 +17,6 @@ import com.knuddels.jtokkit.api.EncodingType
 import com.knuddels.jtokkit.api.IntArrayList
 import java.nio.file.Paths
 import java.util.stream.Collectors
-import ai.djl.inference.Predictor
 
 fun main(args: Array<String>) {
     val instruction = "Summarize the following emails."
@@ -26,9 +26,9 @@ fun main(args: Array<String>) {
     )
     val question = "Email: Project deadline is extended. \nSummary:"
     
-    // Test Budget Controller
+    // Test Budget Controller with ITICA
     val compressed = LLMLingua.compress(instruction, demonstrations, question, 0.6)
-    println("Compressed with Budget Controller:\n$compressed")
+    println("Compressed with Budget Controller & ITICA:\n$compressed")
 }
 
 object LLMLingua {
@@ -48,13 +48,14 @@ object LLMLingua {
             val scores = calculateImportance(logits, tokens)
             
             val targetCount = (tokens.size() * rate).toInt()
-            filterTokens(encoding, tokens, scores, targetCount, emptySet())
+            val keptTokens = filterTokensToIds(tokens, scores, targetCount, emptySet())
+            encoding.decode(keptTokens)
         }
     }
 
     /**
-     * Budget Controller compression.
-     * Preserves Instruction and Question, compresses Demonstrations.
+     * Budget Controller compression with ITICA.
+     * Preserves Instruction and Question, compresses Demonstrations iteratively.
      */
     @JvmStatic
     fun compress(
@@ -63,46 +64,79 @@ object LLMLingua {
         question: String,
         rate: Double
     ): String {
-        val demosStr = demonstrations.joinToString("\n")
-        val fullPrompt = "$instruction\n$demosStr\n$question"
-
         return useModel { predictor, encoding ->
-            val tokens = encoding.encode(fullPrompt)
-            val output = predictor.predict(fullPrompt)!!
-            val logits = output.get(0)
-            val scores = calculateImportance(logits, tokens)
-
-            // Calculate indices to preserve
+            // 1. Encode fixed parts
             val instTokens = encoding.encode(instruction)
             val questTokens = encoding.encode(question)
+            val newlineTokens = encoding.encode("\n")
             
-            val instLen = instTokens.size()
-            val questLen = questTokens.size()
-            val totalLen = tokens.size()
+            // 2. Calculate budget for demonstrations
+            val demoTokensList = demonstrations.map { encoding.encode(it) }
+            val totalDemoLen = demoTokensList.sumOf { it.size() }
             
-            val forceIndices = HashSet<Int>()
-            // Keep Instruction (start)
-            for (i in 0 until instLen) {
-                if (i < totalLen) forceIndices.add(i)
-            }
-            // Keep Question (end)
-            val questStart = (totalLen - questLen).coerceAtLeast(0)
-            for (i in questStart until totalLen) {
-                forceIndices.add(i)
-            }
+            // Calculate total length including separators: Inst + \n + (Demo + \n)*N + Quest
+            val numDemos = demonstrations.size
+            val separatorLen = newlineTokens.size()
+            val totalSeparatorsLen = separatorLen * (1 + numDemos)
+            
+            val totalLen = instTokens.size() + questTokens.size() + totalDemoLen + totalSeparatorsLen
+            
+            val targetTotal = (totalLen * rate).toInt()
+            val reserved = instTokens.size() + questTokens.size() // + totalSeparatorsLen -> Removed to be less aggressive
+            val demoBudget = (targetTotal - reserved).coerceAtLeast(0)
+            
+            // Effective rate for demonstrations
+            val demoRate = if (totalDemoLen > 0) demoBudget.toDouble() / totalDemoLen else 0.0
 
-            val targetCount = (totalLen * rate).toInt()
-            // Ensure we at least keep the forced tokens if possible, or targetCount if it's higher
-            val effectiveTarget = targetCount.coerceAtLeast(forceIndices.size)
+            // 3. Iterative Compression (ITICA)
+            // Start history with Instruction + Newline
+            val history = IntArrayList()
+            for (i in 0 until instTokens.size()) history.add(instTokens.get(i))
+            for (i in 0 until newlineTokens.size()) history.add(newlineTokens.get(i))
             
-            filterTokens(encoding, tokens, scores, effectiveTarget, forceIndices)
+            for (demoTokens in demoTokensList) {
+                // Construct input: History + Current Demo
+                val combinedTokens = IntArrayList()
+                for (i in 0 until history.size()) combinedTokens.add(history.get(i))
+                for (i in 0 until demoTokens.size()) combinedTokens.add(demoTokens.get(i))
+                
+                // Predict using tokens directly
+                val output = predictor.predict(combinedTokens)!!
+                val logits = output.get(0)
+                
+                // Calculate importance for the whole sequence
+                val allScores = calculateImportance(logits, combinedTokens)
+                
+                // Extract scores for the demo part
+                val demoScores = FloatArray(demoTokens.size())
+                val offset = history.size()
+                for (j in 0 until demoTokens.size()) {
+                    demoScores[j] = allScores[offset + j]
+                }
+                
+                // Filter demo tokens (No Structural Integrity)
+                val demoTarget = (demoTokens.size() * demoRate).toInt()
+                val compressedDemoTokens = filterTokensToIds(demoTokens, demoScores, demoTarget, emptySet())
+                
+                if (compressedDemoTokens.size() > 0) {
+                    // Append compressed demo to history
+                    for (i in 0 until compressedDemoTokens.size()) history.add(compressedDemoTokens.get(i))
+                    // Append newline after demo
+                    for (i in 0 until newlineTokens.size()) history.add(newlineTokens.get(i))
+                }
+            }
+            
+            // Append Question
+            for (i in 0 until questTokens.size()) history.add(questTokens.get(i))
+            
+            encoding.decode(history)
         }
     }
 
-    private fun <T> useModel(block: (Predictor<String, NDList>, Encoding) -> T): T {
+    private fun <T> useModel(block: (Predictor<Any, NDList>, Encoding) -> T): T {
         NDManager.newBaseManager().use { manager ->
             val criteria = Criteria.builder()
-                .setTypes(String::class.java, NDList::class.java)
+                .setTypes(Any::class.java, NDList::class.java)
                 .optModelPath(Paths.get("gpt2"))
                 .optEngine("PyTorch")
                 .optDevice(Device.cpu())
@@ -156,13 +190,12 @@ object LLMLingua {
         return scores
     }
 
-    private fun filterTokens(
-        encoding: Encoding,
+    private fun filterTokensToIds(
         tokens: IntArrayList,
         scores: FloatArray,
         targetCount: Int,
         forceIndices: Set<Int>
-    ): String {
+    ): IntArrayList {
         // Keep indices sorted by score (descending)
         val keptIndices: MutableList<Int> = ArrayList()
         
@@ -172,13 +205,6 @@ object LLMLingua {
         // Sort by importance
         keptIndices.sortWith(
             Comparator { a: Int, b: Int ->
-                // If one is forced and other is not, forced comes first? 
-                // Actually, we can just sort by score, and then when selecting top N, 
-                // we ensure forced ones are included?
-                // Better: Assign MAX_VALUE score to forced indices?
-                // Or just handle selection logic below.
-                
-                // Let's modify scores for forced indices to be MAX_VALUE effectively
                 val scoreA = if (forceIndices.contains(a)) Float.MAX_VALUE else scores[a % scores.size]
                 val scoreB = if (forceIndices.contains(b)) Float.MAX_VALUE else scores[b % scores.size]
                 scoreB.compareTo(scoreA)
@@ -191,40 +217,43 @@ object LLMLingua {
             .collect(Collectors.toSet())
 
         // Restore original order
-        val keptTokens = ArrayList<Int>()
+        val result = IntArrayList()
         for (i in 0 until tokens.size()) {
             if (finalIndices.contains(i)) {
-                keptTokens.add(tokens.get(i))
+                result.add(tokens.get(i))
             }
         }
-
-        // Convert back to IntArrayList for decoding
-        val finalTokenList = IntArrayList()
-        for (token in keptTokens) {
-            finalTokenList.add(token)
-        }
-
-        return encoding.decode(finalTokenList)
+        return result
     }
 }
 
 /**
- * Translator to get raw model output
+ * Translator to get raw model output.
+ * Supports String or IntArrayList input.
  */
 internal class RawLogitsTranslator(
     private val manager: NDManager,
-) : Translator<String, NDList> {
+) : Translator<Any, NDList> {
     private val registry: EncodingRegistry = Encodings.newDefaultEncodingRegistry()
     private val encoding: Encoding = registry.getEncoding(EncodingType.R50K_BASE) // GPT-2 encoding
 
     override fun processInput(
         ctx: TranslatorContext,
-        input: String,
+        input: Any,
     ): NDList {
-        val tokens = encoding.encode(input)
-        val tokenArray = tokens.toArray()
-        val longArray = LongArray(tokenArray.size) { tokenArray[it].toLong() }
-        val inputIds = ctx.getNDManager().create(longArray)
+        val inputIdsArray: LongArray
+        if (input is String) {
+            val tokens = encoding.encode(input)
+            val tokenArray = tokens.toArray()
+            inputIdsArray = LongArray(tokenArray.size) { tokenArray[it].toLong() }
+        } else if (input is IntArrayList) {
+             val tokenArray = input.toArray()
+             inputIdsArray = LongArray(tokenArray.size) { tokenArray[it].toLong() }
+        } else {
+            throw IllegalArgumentException("Unsupported input type: ${input::class.java}")
+        }
+        
+        val inputIds = ctx.getNDManager().create(inputIdsArray)
         return NDList(inputIds)
     }
 
