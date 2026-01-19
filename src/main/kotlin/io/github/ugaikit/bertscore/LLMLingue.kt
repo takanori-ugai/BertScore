@@ -16,50 +16,105 @@ import com.knuddels.jtokkit.api.EncodingType
 import com.knuddels.jtokkit.api.IntArrayList
 import java.nio.file.Paths
 import java.util.stream.Collectors
+import ai.djl.inference.Predictor
 
 fun main(args: Array<String>) {
-    val prompt = "This is a very redundant and long prompt that we want to compress significantly."
-    val compressed = LLMLingua.compress(prompt, 0.5)
-    println("Original: " + prompt)
-    println("Compressed: " + compressed)
+    val instruction = "Summarize the following emails."
+    val demonstrations = listOf(
+        "Email: Hi, meeting at 5? \nSummary: Meeting request.",
+        "Email: Lunch tomorrow? \nSummary: Lunch inquiry."
+    )
+    val question = "Email: Project deadline is extended. \nSummary:"
+    
+    // Test Budget Controller
+    val compressed = LLMLingua.compress(instruction, demonstrations, question, 0.6)
+    println("Compressed with Budget Controller:\n$compressed")
 }
 
 object LLMLingua {
+
+    /**
+     * Standard compression with uniform rate.
+     */
     @JvmStatic
     fun compress(
         prompt: String,
         rate: Double,
     ): String {
-        NDManager.newBaseManager().use { manager ->
-            // Load GPT-2 model
-            val criteria =
-                Criteria
-                    .builder()
-                    .setTypes<String, NDList>(String::class.java, NDList::class.java)
-                    .optModelPath(Paths.get("gpt2"))
-                    .optEngine("PyTorch")
-                    .optDevice(Device.cpu())
-                    .optTranslator(RawLogitsTranslator(manager))
-                    .build()
+        return useModel { predictor, encoding ->
+            val tokens = encoding.encode(prompt)
+            val output = predictor.predict(prompt)!!
+            val logits = output.get(0)
+            val scores = calculateImportance(logits, tokens)
+            
+            val targetCount = (tokens.size() * rate).toInt()
+            filterTokens(encoding, tokens, scores, targetCount, emptySet())
+        }
+    }
 
-            // Encode prompt to get tokens for importance calculation
+    /**
+     * Budget Controller compression.
+     * Preserves Instruction and Question, compresses Demonstrations.
+     */
+    @JvmStatic
+    fun compress(
+        instruction: String,
+        demonstrations: List<String>,
+        question: String,
+        rate: Double
+    ): String {
+        val demosStr = demonstrations.joinToString("\n")
+        val fullPrompt = "$instruction\n$demosStr\n$question"
+
+        return useModel { predictor, encoding ->
+            val tokens = encoding.encode(fullPrompt)
+            val output = predictor.predict(fullPrompt)!!
+            val logits = output.get(0)
+            val scores = calculateImportance(logits, tokens)
+
+            // Calculate indices to preserve
+            val instTokens = encoding.encode(instruction)
+            val questTokens = encoding.encode(question)
+            
+            val instLen = instTokens.size()
+            val questLen = questTokens.size()
+            val totalLen = tokens.size()
+            
+            val forceIndices = HashSet<Int>()
+            // Keep Instruction (start)
+            for (i in 0 until instLen) {
+                if (i < totalLen) forceIndices.add(i)
+            }
+            // Keep Question (end)
+            val questStart = (totalLen - questLen).coerceAtLeast(0)
+            for (i in questStart until totalLen) {
+                forceIndices.add(i)
+            }
+
+            val targetCount = (totalLen * rate).toInt()
+            // Ensure we at least keep the forced tokens if possible, or targetCount if it's higher
+            val effectiveTarget = targetCount.coerceAtLeast(forceIndices.size)
+            
+            filterTokens(encoding, tokens, scores, effectiveTarget, forceIndices)
+        }
+    }
+
+    private fun <T> useModel(block: (Predictor<String, NDList>, Encoding) -> T): T {
+        NDManager.newBaseManager().use { manager ->
+            val criteria = Criteria.builder()
+                .setTypes(String::class.java, NDList::class.java)
+                .optModelPath(Paths.get("gpt2"))
+                .optEngine("PyTorch")
+                .optDevice(Device.cpu())
+                .optTranslator(RawLogitsTranslator(manager))
+                .build()
+
             val registry = Encodings.newDefaultEncodingRegistry()
             val encoding = registry.getEncoding(EncodingType.R50K_BASE)
-            val tokens = encoding.encode(prompt)
 
             criteria.loadModel().use { model ->
                 model.newPredictor().use { predictor ->
-
-                    // 1. Get Logits for each token
-                    val output: NDList = predictor.predict(prompt)!!
-                    val logits = output.get(0) // [sequence_length, vocab_size]
-
-                    // 2. Calculate importance score for each token
-                    val importanceScores = calculateImportance(logits, tokens)
-
-                    // 3. Filter tokens
-                    val compressed = compress(prompt, importanceScores, rate)
-                    return compressed
+                    return block(predictor, encoding)
                 }
             }
         }
@@ -76,24 +131,18 @@ object LLMLingua {
 
         val manager = logitsCpu.manager
 
-        // 1. Prepare Logits: Remove the last prediction (for the token after the sequence)
-        // logits shape: [seq_len, vocab_size]
-        // We use logits[0] to predict tokens[1], ..., logits[N-2] to predict tokens[N-1]
+        // 1. Prepare Logits: Remove the last prediction
         val relevantLogits = logitsCpu.get(NDIndex(":-1")) // [seq_len-1, vocab_size]
 
         // 2. Prepare Targets: tokens[1] to tokens[N-1]
         val tokenArray = tokens.toArray()
         val targetIds = LongArray(seqLen - 1) { i -> tokenArray[i + 1].toLong() }
-
-        // Create targetTokens on the same device as logitsCpu
-        val targetTokens =
-            manager
-                .create(targetIds)
-                .toDevice(logitsCpu.device, false)
-                .reshape((seqLen - 1).toLong(), 1)
+        
+        val targetTokens = manager.create(targetIds)
+            .toDevice(logitsCpu.device, false)
+            .reshape((seqLen - 1).toLong(), 1)
 
         // 3. Calculate NLL
-        // Use logSoftmax for numerical stability
         val logProbs = relevantLogits.logSoftmax(-1)
         val tokenLogProbs = logProbs.gather(targetTokens, 1)
         val nll = tokenLogProbs.neg().squeeze() // [seq_len-1]
@@ -107,34 +156,41 @@ object LLMLingua {
         return scores
     }
 
-    private fun compress(
-        prompt: String,
+    private fun filterTokens(
+        encoding: Encoding,
+        tokens: IntArrayList,
         scores: FloatArray,
-        rate: Double,
+        targetCount: Int,
+        forceIndices: Set<Int>
     ): String {
-        val registry: EncodingRegistry = Encodings.newDefaultEncodingRegistry()
-        val encoding: Encoding = registry.getEncoding(EncodingType.R50K_BASE) // GPT-2 encoding
-
-        val tokens = encoding.encode(prompt)
-        val targetCount = (tokens.size() * rate).toInt()
-
         // Keep indices sorted by score (descending)
         val keptIndices: MutableList<Int> = ArrayList()
+        
+        // Add all indices initially
         for (i in 0 until tokens.size()) keptIndices.add(i)
 
+        // Sort by importance
         keptIndices.sortWith(
             Comparator { a: Int, b: Int ->
-                scores[b % scores.size].compareTo(scores[a % scores.size])
+                // If one is forced and other is not, forced comes first? 
+                // Actually, we can just sort by score, and then when selecting top N, 
+                // we ensure forced ones are included?
+                // Better: Assign MAX_VALUE score to forced indices?
+                // Or just handle selection logic below.
+                
+                // Let's modify scores for forced indices to be MAX_VALUE effectively
+                val scoreA = if (forceIndices.contains(a)) Float.MAX_VALUE else scores[a % scores.size]
+                val scoreB = if (forceIndices.contains(b)) Float.MAX_VALUE else scores[b % scores.size]
+                scoreB.compareTo(scoreA)
             },
         )
 
-        // Select top targetCount indices and restore original order
-        val finalIndices =
-            keptIndices
-                .stream()
-                .limit(targetCount.toLong())
-                .collect(Collectors.toSet())
+        // Select top targetCount indices
+        val finalIndices = keptIndices.stream()
+            .limit(targetCount.toLong())
+            .collect(Collectors.toSet())
 
+        // Restore original order
         val keptTokens = ArrayList<Int>()
         for (i in 0 until tokens.size()) {
             if (finalIndices.contains(i)) {
@@ -173,10 +229,10 @@ internal class RawLogitsTranslator(
     }
 
     override fun processOutput(
-        ctx: TranslatorContext,
-        list: NDList,
-    ): NDList {
-        list.attach(manager)
+        ctx: TranslatorContext?,
+        list: NDList?,
+    ): NDList? {
+        list?.attach(manager)
         return list // Return Logits as is
     }
 
