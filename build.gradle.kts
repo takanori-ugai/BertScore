@@ -29,6 +29,7 @@ dependencies {
     implementation("ai.djl.huggingface:tokenizers:0.36.0")
     implementation("org.slf4j:slf4j-simple:2.0.16")
     implementation("io.github.oshai:kotlin-logging-jvm:7.0.0")
+    implementation("com.knuddels:jtokkit:1.1.0")
     testImplementation(kotlin("test"))
 }
 
