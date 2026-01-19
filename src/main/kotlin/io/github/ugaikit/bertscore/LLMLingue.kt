@@ -4,6 +4,7 @@ import ai.djl.Device
 import ai.djl.ndarray.NDArray
 import ai.djl.ndarray.NDList
 import ai.djl.ndarray.NDManager
+import ai.djl.ndarray.index.NDIndex
 import ai.djl.repository.zoo.Criteria
 import ai.djl.translate.Batchifier
 import ai.djl.translate.Translator
@@ -31,7 +32,6 @@ object LLMLingua {
     ): String {
         NDManager.newBaseManager().use { manager ->
             // Load GPT-2 model
-            // Using openai-community/gpt2 to ensure the URL has the expected structure (org/model)
             val criteria =
                 Criteria
                     .builder()
@@ -58,7 +58,8 @@ object LLMLingua {
                     val importanceScores = calculateImportance(logits, tokens)
 
                     // 3. Filter tokens
-                    return compress(prompt, importanceScores, rate)
+                    val compressed = compress(prompt, importanceScores, rate)
+                    return compressed
                 }
             }
         }
@@ -68,25 +69,41 @@ object LLMLingua {
         logits: NDArray,
         tokens: IntArrayList,
     ): FloatArray {
+        // Ensure logits are on CPU to avoid device mismatch errors
+        val logitsCpu = logits.toDevice(Device.cpu(), false)
         val seqLen = tokens.size()
-        val scores = FloatArray(seqLen)
+        if (seqLen <= 1) return FloatArray(seqLen) { Float.MAX_VALUE }
 
-        if (seqLen > 0) {
-            scores[0] = Float.MAX_VALUE // Always keep the first token
-        }
+        val manager = logitsCpu.manager
 
+        // 1. Prepare Logits: Remove the last prediction (for the token after the sequence)
         // logits shape: [seq_len, vocab_size]
-        // logits[i] is the prediction for token at i+1
+        // We use logits[0] to predict tokens[1], ..., logits[N-2] to predict tokens[N-1]
+        val relevantLogits = logitsCpu.get(NDIndex(":-1")) // [seq_len-1, vocab_size]
 
+        // 2. Prepare Targets: tokens[1] to tokens[N-1]
+        val tokenArray = tokens.toArray()
+        val targetIds = LongArray(seqLen - 1) { i -> tokenArray[i + 1].toLong() }
+
+        // Create targetTokens on the same device as logitsCpu
+        val targetTokens =
+            manager
+                .create(targetIds)
+                .toDevice(logitsCpu.device, false)
+                .reshape((seqLen - 1).toLong(), 1)
+
+        // 3. Calculate NLL
         // Use logSoftmax for numerical stability
-        val logProbs = logits.logSoftmax(-1)
+        val logProbs = relevantLogits.logSoftmax(-1)
+        val tokenLogProbs = logProbs.gather(targetTokens, 1)
+        val nll = tokenLogProbs.neg().squeeze() // [seq_len-1]
 
-        for (i in 0 until seqLen - 1) {
-            val nextToken = tokens.get(i + 1)
-            // logProbs[i] contains log probabilities for token at i+1
-            val tokenLogProb = logProbs.getFloat(i.toLong(), nextToken.toLong())
-            scores[i + 1] = -tokenLogProb
-        }
+        // 4. Map to scores
+        val scores = FloatArray(seqLen)
+        scores[0] = Float.MAX_VALUE // Always keep the first token
+        val nllFloats = nll.toFloatArray()
+        System.arraycopy(nllFloats, 0, scores, 1, nllFloats.size)
+
         return scores
     }
 
