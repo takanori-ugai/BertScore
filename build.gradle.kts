@@ -25,6 +25,9 @@ repositories {
 dependencies {
     implementation("ai.djl:api:0.36.0")
     implementation("ai.djl.pytorch:pytorch-engine:0.36.0")
+    // Select a CUDA build that matches your installed driver/toolkit.
+//    implementation("ai.djl.pytorch:pytorch-native-cu124:2.7.1")
+    implementation("ai.djl.pytorch:pytorch-jni:2.7.1-0.36.0")
     implementation("ai.djl.pytorch:pytorch-native-cpu:2.7.1")
     implementation("ai.djl.huggingface:tokenizers:0.36.0")
     implementation("org.slf4j:slf4j-simple:2.0.17")
@@ -86,6 +89,8 @@ tasks {
 //            exceptionFormat = TestExceptionFormat.FULL
             showStandardStreams = true
         }
+        // Force CPU execution in tests to avoid CUDA-only native library loading.
+//        environment("CUDA_VISIBLE_DEVICES", "-1")
     }
 
     withType<Detekt>().configureEach {

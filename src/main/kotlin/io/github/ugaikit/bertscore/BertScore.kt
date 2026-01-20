@@ -1,5 +1,7 @@
 package io.github.ugaikit.bertscore
 
+import ai.djl.Device
+import ai.djl.engine.Engine
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer
 import ai.djl.ndarray.NDArray
 import ai.djl.ndarray.NDList
@@ -59,7 +61,8 @@ class BertScore {
         ref: String,
         cand: String,
     ): Score {
-        NDManager.newBaseManager().use { manager ->
+        val device = requireGpuDevice()
+        NDManager.newBaseManager(device).use { manager ->
             val translator = BertScoreTranslator(modelName, manager)
 
             val criteria =
@@ -68,6 +71,7 @@ class BertScore {
                     .setTypes<String, NDArray>(String::class.java, NDArray::class.java)
                     .optModelUrls("djl://ai.djl.huggingface.pytorch/" + modelName)
                     .optEngine("PyTorch")
+                    .optDevice(device)
                     .optTranslator(translator)
                     .build()
 
@@ -97,6 +101,15 @@ class BertScore {
                     return Score(recall, precision, f1)
                 }
             }
+        }
+    }
+
+    private fun requireGpuDevice(): Device {
+        val gpuCount = Engine.getInstance().getGpuCount()
+        if (gpuCount > 0) {
+            return Device.gpu()
+        } else {
+            return Device.cpu()
         }
     }
 }
