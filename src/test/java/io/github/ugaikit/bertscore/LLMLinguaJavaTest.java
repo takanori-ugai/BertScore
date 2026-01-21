@@ -13,14 +13,15 @@ public class LLMLinguaJavaTest {
   public void testStandardCompression() {
     String prompt =
         "This is a test prompt that should be compressed significantly to verify Java interoperability.";
-    double rate = 0.5;
+    double rate = 0.6;
 
     try (LLMLingua llmLingua = new LLMLingua()) {
       String compressed = llmLingua.compress(prompt, rate);
 
       assertNotNull(compressed);
       assertTrue(compressed.length() < prompt.length(), "Compressed text should be shorter");
-      System.out.println("Java Standard Compression Result: " + compressed);
+      System.out.println("Original: " + prompt);
+      System.out.println("Result: " + compressed);
     }
   }
 

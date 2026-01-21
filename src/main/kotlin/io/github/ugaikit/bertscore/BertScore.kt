@@ -1,5 +1,7 @@
 package io.github.ugaikit.bertscore
 
+import ai.djl.Device
+import ai.djl.engine.Engine
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer
 import ai.djl.ndarray.NDArray
 import ai.djl.ndarray.NDList
@@ -41,6 +43,11 @@ data class Score(
 class BertScore {
     private val logger = KotlinLogging.logger {}
 
+    private fun getPreferredDevice(): Device {
+        val gpuCount = Engine.getInstance().getGpuCount()
+        return if (gpuCount > 0) Device.gpu() else Device.cpu()
+    }
+
     /**
      * The HuggingFace model name used for embedding extraction.
      */
@@ -59,8 +66,9 @@ class BertScore {
         ref: String,
         cand: String,
     ): Score {
-        NDManager.newBaseManager().use { manager ->
-            val translator = BertScoreTranslator(modelName, manager)
+        val device = getPreferredDevice()
+        NDManager.newBaseManager(device).use { manager ->
+            val translator = BertScoreTranslator(modelName, manager, device)
 
             val criteria =
                 Criteria
@@ -68,6 +76,7 @@ class BertScore {
                     .setTypes<String, NDArray>(String::class.java, NDArray::class.java)
                     .optModelUrls("djl://ai.djl.huggingface.pytorch/" + modelName)
                     .optEngine("PyTorch")
+                    .optDevice(device)
                     .optTranslator(translator)
                     .build()
 
@@ -75,8 +84,16 @@ class BertScore {
                 model.newPredictor().use { predictor ->
 
                     // 2. Get embeddings
-                    val refEmbeds: NDArray = predictor.predict(ref)!! // [num_tokens, hidden_size]
-                    val candEmbeds: NDArray = predictor.predict(cand)!! // [num_tokens, hidden_size]
+                    var refEmbeds: NDArray = predictor.predict(ref)!! // [num_tokens, hidden_size]
+                    var candEmbeds: NDArray = predictor.predict(cand)!! // [num_tokens, hidden_size]
+
+                    // Ensure both tensors are on the same device to avoid mismatches in ops.
+                    if (refEmbeds.device != device) {
+                        refEmbeds = refEmbeds.toDevice(device, true)
+                    }
+                    if (candEmbeds.device != device) {
+                        candEmbeds = candEmbeds.toDevice(device, true)
+                    }
 
                     logger.info { "Ref Embeds Shape: ${refEmbeds.shape}" }
                     logger.info { "Cand Embeds Shape: ${candEmbeds.shape}" }
@@ -84,8 +101,9 @@ class BertScore {
                     // 3. Calculate cosine similarity
                     // Normalize by dividing by L2 norm (make unit vectors)
                     // Shape is [sequence_length, hidden_size], so normalize along axis=1
-                    val refNorm = refEmbeds.div(refEmbeds.norm(intArrayOf(1), true).add(EPSILON))
-                    val candNorm = candEmbeds.div(candEmbeds.norm(intArrayOf(1), true).add(EPSILON))
+                    val epsilon = refEmbeds.getManager().create(EPSILON)
+                    val refNorm = refEmbeds.div(refEmbeds.norm(intArrayOf(1), true).add(epsilon))
+                    val candNorm = candEmbeds.div(candEmbeds.norm(intArrayOf(1), true).add(epsilon))
 
                     // Similarity matrix between all tokens [cand_tokens, ref_tokens]
                     val simMatrix = candNorm.matMul(refNorm.transpose())
@@ -94,7 +112,7 @@ class BertScore {
                     val recall = simMatrix.max(intArrayOf(1)).mean().getFloat() // Closest candidate token for each reference token
                     val precision = simMatrix.max(intArrayOf(0)).mean().getFloat() // Closest reference token for each candidate token
                     val f1 = 2 * (precision * recall) / (precision + recall)
-                    return Score(recall, precision, f1)
+                    return Score(precision, recall, f1)
                 }
             }
         }
@@ -112,6 +130,7 @@ class BertScore {
 internal class BertScoreTranslator(
     private val modelName: String?,
     private val manager: NDManager,
+    private val device: Device,
 ) : Translator<String, NDArray> {
     private val logger = KotlinLogging.logger {}
 
@@ -187,10 +206,14 @@ internal class BertScoreTranslator(
             targetOutput = list.get(0)
         }
 
-        val result = targetOutput
-        // Attach to the caller's Manager to prevent resource release
-        // Here, attach to the manager managed by the Main function
-        result.attach(manager.parentManager)
+        val result =
+            if (targetOutput.device != device) {
+                targetOutput.toDevice(device, true)
+            } else {
+                targetOutput
+            }
+        // Attach to the caller's Manager to prevent resource release.
+        result.attach(manager)
         return result
     }
 

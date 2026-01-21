@@ -48,6 +48,7 @@ fun main() {
 ## Requirements
 
 - Java 17 or higher
+- CUDA-capable GPU with a matching `pytorch-native-cuXXX` runtime on the classpath
 
 ## License
 

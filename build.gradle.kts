@@ -25,8 +25,17 @@ repositories {
 dependencies {
     implementation("ai.djl:api:0.36.0")
     implementation("ai.djl.pytorch:pytorch-engine:0.36.0")
+    // Select a CUDA build that matches your installed driver/toolkit.
+//    implementation("ai.djl.pytorch:pytorch-native-cu124:2.5.1")
+    implementation("ai.djl.pytorch:pytorch-jni:2.7.1-0.36.0")
     implementation("ai.djl.pytorch:pytorch-native-cpu:2.7.1")
     implementation("ai.djl.huggingface:tokenizers:0.36.0")
+    implementation("ai.djl.onnxruntime:onnxruntime-engine:0.36.0")
+//    implementation("ai.djl.onnxruntime:onnxruntime-engine:0.36.0") {
+//        exclude("com.microsoft.onnxruntime:onnxruntime")
+//    }
+    implementation("com.microsoft.onnxruntime:onnxruntime_gpu:1.19.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-extensions:0.13.0")
     implementation("org.slf4j:slf4j-simple:2.0.16")
     implementation("io.github.oshai:kotlin-logging-jvm:7.0.0")
     implementation("com.knuddels:jtokkit:1.1.0")

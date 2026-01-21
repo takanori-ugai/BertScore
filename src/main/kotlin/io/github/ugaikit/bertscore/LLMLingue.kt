@@ -6,6 +6,8 @@ import ai.djl.ndarray.NDArray
 import ai.djl.ndarray.NDList
 import ai.djl.ndarray.NDManager
 import ai.djl.ndarray.index.NDIndex
+import ai.djl.ndarray.types.DataType
+import ai.djl.ndarray.types.Shape
 import ai.djl.repository.zoo.Criteria
 import ai.djl.repository.zoo.ZooModel
 import ai.djl.translate.Batchifier
@@ -16,6 +18,7 @@ import com.knuddels.jtokkit.api.Encoding
 import com.knuddels.jtokkit.api.EncodingRegistry
 import com.knuddels.jtokkit.api.EncodingType
 import com.knuddels.jtokkit.api.IntArrayList
+import io.github.oshai.kotlinlogging.KotlinLogging
 import java.nio.file.Paths
 import java.util.stream.Collectors
 
@@ -36,23 +39,40 @@ fun main(args: Array<String>) {
 }
 
 class LLMLingua : AutoCloseable {
+    private val logger = KotlinLogging.logger {}
     private val manager: NDManager = NDManager.newBaseManager()
     private val model: ZooModel<Any, NDList>
     private val predictor: Predictor<Any, NDList>
     private val encoding: Encoding
 
     init {
-        val criteria =
-            Criteria
-                .builder()
-                .setTypes(Any::class.java, NDList::class.java)
-                .optModelPath(Paths.get("gpt2"))
-                .optEngine("PyTorch")
-                .optDevice(Device.cpu())
-                .optTranslator(RawLogitsTranslator(manager))
-                .build()
+        fun buildModel(device: Device): ZooModel<Any, NDList> {
+            val criteria =
+                Criteria
+                    .builder()
+                    .setTypes(Any::class.java, NDList::class.java)
+                    .optModelUrls("file:///home/gpugrid/BertScore/output_qwen_onnx/")
+//         .optModelPath(Paths.get("gpt2"))
+                    .optEngine("OnnxRuntime")
+//                .optEngine("PyTorch")
+                    .optDevice(Device.cpu())
+//                    .optOption("ort.execution_provider", "cuda")
+//                    .optOption("ort.cuda.device_id", "0")
+                    // 以下を追加：メモリ確保の戦略を「必要最小限」に変更
+//                    .optOption("ort.cuda.arena_extend_strategy", "kSameAsRequested")
+//                    .optOption("ort.cuda.cudnn_conv_algo_search", "DEFAULT") // 探索をスキップして初期化を安定させる
+                    .optTranslator(RawLogitsTranslator(manager))
+                    .build()
+            return criteria.loadModel()
+        }
 
-        model = criteria.loadModel()
+        model =
+            try {
+                buildModel(Device.gpu())
+            } catch (e: Exception) {
+                logger.warn(e) { "Failed to load LLMLingua model on GPU; falling back to CPU." }
+                buildModel(Device.cpu())
+            }
         predictor = model.newPredictor()
 
         val registry = Encodings.newDefaultEncodingRegistry()
@@ -164,11 +184,16 @@ class LLMLingua : AutoCloseable {
         tokens: IntArrayList,
     ): FloatArray {
         // Ensure logits are on CPU to avoid device mismatch errors
-        val logitsCpu = logits.toDevice(Device.cpu(), false)
+        var logitsCpu = logits.toDevice(Device.cpu(), false)
         val seqLen = tokens.size()
         if (seqLen <= 1) return FloatArray(seqLen) { Float.MAX_VALUE }
 
         val manager = logitsCpu.manager
+
+        // Some models return [1, seq_len, vocab]; normalize to [seq_len, vocab].
+        if (logitsCpu.shape.dimension() == 3 && logitsCpu.shape.get(0) == 1L) {
+            logitsCpu = logitsCpu.squeeze(0)
+        }
 
         // 1. Prepare Logits: Remove the last prediction
         val relevantLogits = logitsCpu.get(NDIndex(":-1")) // [seq_len-1, vocab_size]
@@ -245,6 +270,9 @@ internal class RawLogitsTranslator(
 ) : Translator<Any, NDList> {
     private val registry: EncodingRegistry = Encodings.newDefaultEncodingRegistry()
     private val encoding: Encoding = registry.getEncoding(EncodingType.R50K_BASE) // GPT-2 encoding
+    private val numLayers = 24
+    private val numKvHeads = 2
+    private val headDim = 64
 
     override fun processInput(
         ctx: TranslatorContext,
@@ -262,8 +290,34 @@ internal class RawLogitsTranslator(
             throw IllegalArgumentException("Unsupported input type: ${input::class.java}")
         }
 
-        val inputIds = ctx.getNDManager().create(inputIdsArray)
-        return NDList(inputIds)
+        val manager = ctx.getNDManager()
+        val inputIds =
+            manager.create(inputIdsArray)
+        inputIds.setName("input_ids")
+        val attentionMask =
+            manager.ones(Shape(inputIdsArray.size.toLong()), DataType.INT64)
+        attentionMask.setName("attention_mask")
+        val positionIdsArray = LongArray(inputIdsArray.size) { it.toLong() }
+        val positionIds =
+            manager
+                .create(positionIdsArray)
+                .toType(DataType.INT64, false)
+        positionIds.setName("position_ids")
+        val inputs = NDList(inputIds, attentionMask, positionIds)
+
+        val pastShape = Shape(numKvHeads.toLong(), 0L, headDim.toLong())
+        for (i in 0 until numLayers) {
+            val pastKey =
+                manager.zeros(pastShape, DataType.FLOAT32)
+            pastKey.setName("past_key_values.$i.key")
+            val pastValue =
+                manager.zeros(pastShape, DataType.FLOAT32)
+            pastValue.setName("past_key_values.$i.value")
+            inputs.add(pastKey)
+            inputs.add(pastValue)
+        }
+
+        return inputs
     }
 
     override fun processOutput(
